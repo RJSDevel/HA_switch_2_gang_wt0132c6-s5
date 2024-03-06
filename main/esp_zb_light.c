@@ -48,7 +48,6 @@
 #include "ha/esp_zigbee_ha_standard.h"
 
 #include "esp_zb_light.h"
-#include "switch_driver.h"
 
 #if !defined CONFIG_ZB_ZCZR
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile light (End Device) source code.

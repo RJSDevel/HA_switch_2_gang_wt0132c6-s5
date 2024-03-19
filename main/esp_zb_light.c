@@ -79,6 +79,7 @@ esp_zb_on_off_cluster_cfg_t on_off_cfg = {};
 static bool switch_state_1 = false;
 static bool switch_state_2 = false;
 
+#define CONFIG_BUTTON_SHORT_PRESS_TIME_MS 100
 #define CONFIG_BUTTON_LONG_PRESS_TIME_MS 5000
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask) {
@@ -311,7 +312,7 @@ void app_main(void) {
 		ESP_LOGE(TAG, "Button create failed");
 	}
 
-	iot_button_register_cb(gpio_btn, BUTTON_SINGLE_CLICK, button_1_handler, NULL);
+	iot_button_register_cb(gpio_btn, BUTTON_PRESS_DOWN, button_1_handler, NULL);
 	iot_button_register_cb(gpio_btn, BUTTON_LONG_PRESS_START, button_1_network_handler, NULL);
 
 	button_config_t gpio_btn2_cfg = {
@@ -328,7 +329,7 @@ void app_main(void) {
 		ESP_LOGE(TAG, "Button create failed");
 	}
 
-	iot_button_register_cb(gpio_btn, BUTTON_SINGLE_CLICK, button_2_handler, NULL);
+	iot_button_register_cb(gpio_btn, BUTTON_PRESS_DOWN, button_2_handler, NULL);
 
 	xTaskCreate(esp_zb_task, "Zigbee_main", 4096, NULL, 5, NULL);
 }

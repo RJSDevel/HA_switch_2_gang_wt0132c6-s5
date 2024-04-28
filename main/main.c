@@ -35,6 +35,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "main.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_check.h"
@@ -47,7 +49,6 @@
 
 #include "ha/esp_zigbee_ha_standard.h"
 
-#include "esp_zb_light.h"
 
 #if !defined CONFIG_ZB_ZCZR
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile light (End Device) source code.
@@ -56,14 +57,16 @@
 static const char *TAG = "ESP_ZB_ON_OFF_LIGHT";
 /********************* Define functions **************************/
 
-char model_id[] = { 6, 'T', 'S', '0', '0', '0', '2' };
-char manufacturer_name[] = { 4, 'T', 'u', 'Y', 'a' };
+static char model_id[16];
+static char manufacturer_name[16];
+static char firmware_version[16];
 
 uint8_t zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE;
 uint8_t power_source = 0x04;
 uint8_t default_val = ESP_ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE;
 
-esp_zb_on_off_cluster_cfg_t on_off_cfg = {};
+esp_zb_on_off_cluster_cfg_t ep1_on_off_cfg = {};
+esp_zb_on_off_cluster_cfg_t ep2_on_off_cfg = {};
 
 #define BUTTON_TOGGLE_SWITCH_1  GPIO_NUM_17
 #define BUTTON_TOGGLE_SWITCH_2  GPIO_NUM_3
@@ -76,11 +79,21 @@ esp_zb_on_off_cluster_cfg_t on_off_cfg = {};
 
 #define LED_COMMISSION GPIO_NUM_9
 
-static bool switch_state_1 = false;
-static bool switch_state_2 = false;
+#define BUTTON_SHORT_PRESS_TIME_MS 100
+#define BUTTON_LONG_PRESS_TIME_MS 5000
 
-#define CONFIG_BUTTON_SHORT_PRESS_TIME_MS 100
-#define CONFIG_BUTTON_LONG_PRESS_TIME_MS 5000
+static bool ep1_state_out = false;
+static bool ep2_state_out = false;
+
+static void esp_error_blink(void *pvParameters) {
+	int i = 0;
+	while(i++ < 5) {
+		gpio_set_level(LED_COMMISSION, 1);
+		vTaskDelay(1000 / portTICK_PERIOD_MS);
+		gpio_set_level(LED_COMMISSION, 0);
+	}
+	esp_restart();
+}
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask) {
 	ESP_ERROR_CHECK(esp_zb_bdb_start_top_level_commissioning(mode_mask));
@@ -97,7 +110,9 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
 				ESP_ZB_BDB_MODE_INITIALIZATION);
 		break;
 	case ESP_ZB_ZDO_SIGNAL_LEAVE:
+	{
 		ESP_LOGI(TAG, "ESP_ZB_ZDO_SIGNAL_LEAVE");
+	}
 	case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
 	case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
 		gpio_set_level(LED_COMMISSION, 0);
@@ -108,7 +123,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
 		} else {
 			/* commissioning failed */
 			ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %s)", esp_err_to_name(err_status));
-			esp_restart();
+			xTaskCreate(esp_error_blink, "error task", 4096, NULL, 5, NULL);
 		}
 		break;
 	case ESP_ZB_BDB_SIGNAL_STEERING:
@@ -144,20 +159,19 @@ static void set_relay_state(uint endpoint, bool state) {
 
 	switch (endpoint) {
 	case HA_ESP_LIGHT_ENDPOINT_1:
-		switch_state_1 = state;
+		ep1_state_out = state;
 		gpio_set_level(RELAY_1, state);
 		gpio_set_level(LED_OFF_1, !state);
 		break;
 	case HA_ESP_LIGHT_ENDPOINT_2:
-		switch_state_2 = state;
+		ep2_state_out = state;
 		gpio_set_level(RELAY_2, state);
 		gpio_set_level(LED_OFF_2, !state);
 		break;
 	}
 }
 
-static esp_err_t zb_attribute_handler(
-		const esp_zb_zcl_set_attr_value_message_t *message) {
+static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message) {
 	esp_err_t ret = ESP_OK;
 	ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty message");
 	ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS,
@@ -200,7 +214,7 @@ static void esp_zb_buttons_handler(uint button) {
 	ESP_LOGI(TAG, "esp_zb_buttons_handler");
 
 	uint endpoint = button == BUTTON_TOGGLE_SWITCH_1 ? HA_ESP_LIGHT_ENDPOINT_1 : HA_ESP_LIGHT_ENDPOINT_2;
-	bool onOff = !(button == BUTTON_TOGGLE_SWITCH_1 ? switch_state_1 : switch_state_2);
+	bool onOff = !(button == BUTTON_TOGGLE_SWITCH_1 ? ep1_state_out : ep2_state_out);
 
 	set_relay_state(endpoint, onOff);
 
@@ -229,11 +243,20 @@ static void button_2_handler(void *button_handle, void *usr_data) {
 	esp_zb_buttons_handler(BUTTON_TOGGLE_SWITCH_2);
 }
 
+static void set_zcl_string(char *buffer, char *value)
+{
+    buffer[0] = (char) strlen(value);
+    memcpy(buffer + 1, value, buffer[0]);
+}
 
 static void esp_zb_task(void *pvParameters) {
 	/* initialize Zigbee stack */
 	esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
 	esp_zb_init(&zb_nwk_cfg);
+
+    set_zcl_string(manufacturer_name, MANUFACTURER_NAME);
+    set_zcl_string(model_id, MODEL_NAME);
+    set_zcl_string(firmware_version, FIRMWARE_VERSION);
 
 	esp_zb_attribute_list_t *esp_zb_basic_cluster = esp_zb_zcl_attr_list_create(
 			ESP_ZB_ZCL_CLUSTER_ID_BASIC);
@@ -241,36 +264,70 @@ static void esp_zb_task(void *pvParameters) {
 			ESP_ZB_ZCL_ATTR_BASIC_ZCL_VERSION_ID, &zcl_version);
 	esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster,
 			ESP_ZB_ZCL_ATTR_BASIC_POWER_SOURCE_ID, &power_source);
+
 	esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster,
 			ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, &model_id[0]);
 	esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster,
 			ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, &manufacturer_name[0]);
+	esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster,
+			ESP_ZB_ZCL_ATTR_BASIC_SW_BUILD_ID, &firmware_version[0]);
 
 	esp_zb_attribute_list_t *esp_zb_identify_cluster =
 			esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY);
 	esp_zb_identify_cluster_add_attr(esp_zb_identify_cluster,
 			ESP_ZB_ZCL_ATTR_IDENTIFY_IDENTIFY_TIME_ID, &default_val);
 
-	esp_zb_attribute_list_t *esp_zb_on_off_cluster =
-			esp_zb_on_off_cluster_create(&on_off_cfg);
+	esp_zb_attribute_list_t *esp_zb_ep1_on_off_cluster = esp_zb_on_off_cluster_create(&ep1_on_off_cfg);
+	esp_zb_cluster_list_t *esp_ep1_zb_on_off_cluster_list = esp_zb_zcl_cluster_list_create();
+	esp_zb_cluster_list_add_basic_cluster(esp_ep1_zb_on_off_cluster_list, esp_zb_basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+	esp_zb_cluster_list_add_identify_cluster(esp_ep1_zb_on_off_cluster_list, esp_zb_identify_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+	esp_zb_cluster_list_add_on_off_cluster(esp_ep1_zb_on_off_cluster_list, esp_zb_ep1_on_off_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
-	esp_zb_cluster_list_t *esp_zb_on_off_cluster_list =
-			esp_zb_zcl_cluster_list_create();
-	esp_zb_cluster_list_add_basic_cluster(esp_zb_on_off_cluster_list,
-			esp_zb_basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-	esp_zb_cluster_list_add_identify_cluster(esp_zb_on_off_cluster_list,
-			esp_zb_identify_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-	esp_zb_cluster_list_add_on_off_cluster(esp_zb_on_off_cluster_list,
-			esp_zb_on_off_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    /** Create ota client cluster with attributes.
+     *  Manufacturer code, image type and file version should match with configured values for server.
+     *  If the client values do not match with configured values then it shall discard the command and
+     *  no further processing shall continue.
+     */
+    esp_zb_ota_cluster_cfg_t ota_cluster_cfg = {
+        .ota_upgrade_downloaded_file_ver = OTA_UPGRADE_FILE_VERSION,
+        .ota_upgrade_manufacturer = OTA_UPGRADE_MANUFACTURER,
+        .ota_upgrade_image_type = OTA_UPGRADE_IMAGE_TYPE,
+    };
+    esp_zb_attribute_list_t *esp_zb_ota_client_cluster = esp_zb_ota_cluster_create(&ota_cluster_cfg);
+    /** add client parameters to ota client cluster */
+    esp_zb_zcl_ota_upgrade_client_variable_t variable_config  = {
+        .timer_query = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,          	/* time interval for query next image request command */
+        .hw_version = OTA_UPGRADE_HW_VERSION,                           		/* version of hardware */
+        .max_data_size = OTA_UPGRADE_MAX_DATA_SIZE,                           	/* maximum data size of query block image */
+    };
+    esp_zb_ota_cluster_add_attr(esp_zb_ota_client_cluster, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID, &variable_config);
+    esp_zb_cluster_list_add_ota_cluster(esp_ep1_zb_on_off_cluster_list, esp_zb_ota_client_cluster, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
 
-	esp_zb_ep_list_t *esp_zb_ep = esp_zb_ep_list_create();
-	esp_zb_ep_list_add_ep(esp_zb_ep, esp_zb_on_off_cluster_list,
-			HA_ESP_LIGHT_ENDPOINT_1, ESP_ZB_AF_HA_PROFILE_ID,
-			ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID);
-	esp_zb_ep_list_add_ep(esp_zb_ep, esp_zb_on_off_cluster_list,
-			HA_ESP_LIGHT_ENDPOINT_2, ESP_ZB_AF_HA_PROFILE_ID,
-			ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID);
-	esp_zb_device_register(esp_zb_ep);
+	esp_zb_attribute_list_t *esp_zb_ep2_on_off_cluster = esp_zb_on_off_cluster_create(&ep2_on_off_cfg);
+	esp_zb_cluster_list_t *esp_zb_ep2_on_off_cluster_list = esp_zb_zcl_cluster_list_create();
+	esp_zb_cluster_list_add_on_off_cluster(esp_zb_ep2_on_off_cluster_list, esp_zb_ep2_on_off_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+	esp_zb_ep_list_t *esp_zb_ep_list = esp_zb_ep_list_create();
+
+	esp_zb_endpoint_config_t ep1_config = {
+			.endpoint = HA_ESP_LIGHT_ENDPOINT_1,
+			.app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+			.app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
+			.app_device_version = 0
+	};
+
+	esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_ep1_zb_on_off_cluster_list, ep1_config);
+
+	esp_zb_endpoint_config_t ep2_config = {
+			.endpoint = HA_ESP_LIGHT_ENDPOINT_2,
+			.app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+			.app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
+			.app_device_version = 0
+	};
+
+	esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_ep2_on_off_cluster_list, ep2_config);
+
+	esp_zb_device_register(esp_zb_ep_list);
 
 	esp_zb_core_action_handler_register(zb_action_handler);
 	esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
@@ -300,8 +357,8 @@ void app_main(void) {
 
 	button_config_t gpio_btn1_cfg = {
 			.type = BUTTON_TYPE_GPIO,
-			.long_press_time = CONFIG_BUTTON_LONG_PRESS_TIME_MS,
-			.short_press_time = CONFIG_BUTTON_SHORT_PRESS_TIME_MS,
+			.long_press_time = BUTTON_LONG_PRESS_TIME_MS,
+			.short_press_time = BUTTON_SHORT_PRESS_TIME_MS,
 			.gpio_button_config = {
 					.gpio_num = BUTTON_TOGGLE_SWITCH_1,
 					.active_level = 0,
@@ -317,7 +374,7 @@ void app_main(void) {
 
 	button_config_t gpio_btn2_cfg = {
 				.type = BUTTON_TYPE_GPIO,
-				.short_press_time = CONFIG_BUTTON_SHORT_PRESS_TIME_MS,
+				.short_press_time = BUTTON_SHORT_PRESS_TIME_MS,
 				.gpio_button_config = {
 						.gpio_num = BUTTON_TOGGLE_SWITCH_2,
 						.active_level = 0,
